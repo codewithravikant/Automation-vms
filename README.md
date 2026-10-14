@@ -157,7 +157,6 @@ monitoring/       Stretch: netdata
 | [docs/networking.md](docs/networking.md) | Adapters, address plan, UFW ports, WireGuard / Netdata |
 | [docs/security.md](docs/security.md) | Hardening checklist + stretch demos |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common VirtualBox / SSH / UFW failures |
-| [docs/roadmap.md](docs/roadmap.md) | Done vs deferred stretch |
 
 
 
