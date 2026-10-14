@@ -1,0 +1,5 @@
+# Extra UFW allows for cicd (Jenkins + local registry).
+# Lab CIDR only — not public.
+
+from 10.10.0.0/24 to any port 8080 proto tcp
+from 10.10.0.0/24 to any port 5000 proto tcp

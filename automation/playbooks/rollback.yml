@@ -1,0 +1,77 @@
+---
+# Redeploy previously recorded last-known-good image tags.
+
+- name: Load last-known-good tag from cicd
+  hosts: cicd_hosts
+  gather_facts: false
+  tasks:
+    - name: Read deployed_version file
+      ansible.builtin.slurp:
+        src: "{{ deployed_version_file }}"
+      register: ver_file
+
+    - name: Parse PREVIOUS_TAG (fall back to IMAGE_TAG)
+      ansible.builtin.set_fact:
+        rollback_tag: >-
+          {{
+            (
+              ver_file.content | b64decode | regex_findall('(?m)^PREVIOUS_TAG=(.+)$') | first | default('') | trim
+            )
+            if (
+              ver_file.content | b64decode | regex_findall('(?m)^PREVIOUS_TAG=(.+)$') | first | default('') | trim | length > 0
+            )
+            else (
+              ver_file.content | b64decode | regex_findall('(?m)^IMAGE_TAG=(.+)$') | first | default('latest') | trim
+            )
+          }}
+
+    - name: Fail when no rollback tag available
+      ansible.builtin.fail:
+        msg: "No PREVIOUS_TAG / IMAGE_TAG found in {{ deployed_version_file }}"
+      when: rollback_tag | length == 0
+
+    - name: Show rollback target
+      ansible.builtin.debug:
+        msg: "Rolling back to tag {{ rollback_tag }}"
+
+- name: Deploy backend (rollback)
+  hosts: apps
+  gather_facts: false
+  vars:
+    image_tag: "{{ hostvars['cicd'].rollback_tag }}"
+  roles:
+    - role: app_deploy
+      vars:
+        app_deploy_component: backend
+
+- name: Deploy frontend (rollback)
+  hosts: web
+  gather_facts: false
+  vars:
+    image_tag: "{{ hostvars['cicd'].rollback_tag }}"
+  roles:
+    - role: app_deploy
+      vars:
+        app_deploy_component: frontend
+
+- name: Refresh load balancer (rollback)
+  hosts: lb
+  gather_facts: true
+  roles:
+    - role: loadbalancer
+
+- name: Note rollback on cicd
+  hosts: cicd_hosts
+  gather_facts: true
+  tasks:
+    - name: Update deployed_version after rollback
+      ansible.builtin.copy:
+        dest: "{{ deployed_version_file }}"
+        mode: "0644"
+        content: |
+          IMAGE_TAG={{ rollback_tag }}
+          PREVIOUS_TAG=
+          BACKEND={{ registry }}/{{ backend_image_name }}:{{ rollback_tag }}
+          FRONTEND={{ registry }}/{{ frontend_image_name }}:{{ rollback_tag }}
+          UPDATED_AT={{ ansible_date_time.iso8601 }}
+          NOTE=rollback

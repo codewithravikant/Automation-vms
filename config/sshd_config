@@ -1,0 +1,18 @@
+# Automation-VMs SSH hardening — drop-in for /etc/ssh/sshd_config.d/
+# Applied by provisioning/ssh.sh → 99-automation-alchemy.conf
+#
+# Review / private-network access: devops only.
+# Vagrant NAT SSH (source 10.0.2.0/24): also allow vagrant so `vagrant ssh` works.
+# See docs/decisions.md.
+
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+X11Forwarding no
+
+AllowUsers devops
+
+Match Address 10.0.2.0/24
+	AllowUsers devops vagrant

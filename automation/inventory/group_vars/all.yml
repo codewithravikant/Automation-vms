@@ -1,0 +1,63 @@
+---
+project_root: /opt/automation-alchemy
+project_name: automation-alchemy
+lab_cidr: 10.10.0.0/24
+devops_user: devops
+devops_password: devops
+
+ansible_user: devops
+ansible_ssh_private_key_file: "{{ playbook_dir }}/../../keys/id_ed25519"
+ansible_become: true
+ansible_become_password: "{{ devops_password }}"
+ansible_python_interpreter: /usr/bin/python3
+
+registry_host: cicd
+registry_ip: 10.10.0.40
+registry_port: 5000
+registry: "10.10.0.40:5000"
+
+backend_image_name: aa-backend
+frontend_image_name: aa-frontend
+backend_container: aa-backend
+frontend_container: aa-frontend
+
+appserver_ip: 10.10.0.20
+loadbalancer_ip: 10.10.0.10
+jenkins_port: 8080
+jenkins_url: "http://10.10.0.40:8080/"
+
+# Git forge used for CI checkout + webhook (override for your host).
+# Deploy key: keys/id_ed25519 (read-only on the forge).
+gitea_ssh_url: "git@git.example.com:your-org/automation-vms.git"
+gitea_https_url: "https://git.example.com/your-org/automation-vms"
+gitea_host: "git.example.com"
+gitea_branch: "main"
+
+# Jenkins (cicd) → VirtualBox host SSH. From guest, host is usually 10.10.0.1.
+aiwin_ssh_host: "10.10.0.1"
+aiwin_ssh_user: "labuser"
+aiwin_ssh_port: 22
+aiwin_project_dir: "~/automation-vms"
+
+deploy_state_dir: /var/lib/automation-alchemy
+deployed_version_file: /var/lib/automation-alchemy/deployed_version
+
+# Git SHA used for image tags (override from Jenkins / alchemy.sh)
+image_tag: latest
+previous_image_tag: ""
+
+# Slack Notification plugin (token/URL in secrets/slack_webhook — never commit).
+slack_webhook_file: "{{ playbook_dir }}/../secrets/slack_webhook"
+slack_team_domain: "your-workspace"
+slack_channel: "#jenkins-builds"
+slack_credential_id: "slack-bot-token"
+
+network_hosts_lines: |
+  10.10.0.10 loadbalancer
+  10.10.0.11 web1
+  10.10.0.12 web2
+  10.10.0.20 appserver
+  10.10.0.30 backup
+  10.10.0.40 cicd
+
+lb_algorithm: weighted

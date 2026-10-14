@@ -1,0 +1,25 @@
+---
+# Harden + configure all lab VMs (idempotent re-apply of Phase 1/2 state).
+- name: Common hardening on all hosts
+  hosts: lab
+  gather_facts: true
+  roles:
+    - role: common
+
+- name: Docker on container hosts
+  hosts: docker_hosts
+  gather_facts: false
+  roles:
+    - role: docker
+
+- name: Load balancer role
+  hosts: lb
+  gather_facts: true
+  roles:
+    - role: loadbalancer
+
+- name: Backup role (host + export staging)
+  hosts: lab:!cicd_hosts
+  gather_facts: false
+  roles:
+    - role: backup

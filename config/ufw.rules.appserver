@@ -1,0 +1,4 @@
+# Extra UFW allows for appserver (backend API).
+# Format: remainder of `ufw allow ...`
+
+from 10.10.0.0/24 to any port 3000 proto tcp

@@ -1,0 +1,39 @@
+jenkins:
+  systemMessage: "Automation-VMs CI — local lab Jenkins"
+  numExecutors: 2
+  mode: NORMAL
+  scmCheckoutRetryCount: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          name: "admin"
+          password: "{{ devops_password }}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+  remotingSecurity:
+    enabled: true
+
+unclassified:
+  location:
+    url: "{{ jenkins_url }}"
+  scmGit:
+    globalConfigName: "alchemy-ci"
+    globalConfigEmail: "ci@automation-alchemy.local"
+  slackNotifier:
+    teamDomain: "{{ slack_team_domain }}"
+    tokenCredentialId: "{{ slack_credential_id }}"
+    botUser: true
+    room: "{{ slack_channel }}"
+
+security:
+  queueItemAuthenticator:
+    authenticators: []
+
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "git"

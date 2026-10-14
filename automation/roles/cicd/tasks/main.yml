@@ -1,0 +1,358 @@
+---
+# Install Jenkins LTS + local Docker registry on cicd.
+
+- name: Wait until apt/dpkg locks are free
+  ansible.builtin.shell: |
+    ! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1
+  register: apt_lock_free
+  retries: 60
+  delay: 5
+  until: apt_lock_free.rc == 0
+  changed_when: false
+
+- name: Install Java and helpers for Jenkins
+  ansible.builtin.apt:
+    name:
+      # Jenkins LTS 2.555.1+ requires Java 21+ (Java 17 no longer supported)
+      - openjdk-21-jre-headless
+      - curl
+      - gnupg
+      - apt-transport-https
+      - ca-certificates
+      - git
+      - unzip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  register: apt_jenkins_deps
+  retries: 20
+  delay: 15
+  until: apt_jenkins_deps is succeeded
+
+- name: Add Jenkins apt key
+  ansible.builtin.get_url:
+    # 2026 key (NO_PUBKEY 7198F4B714ABFC68 if still on 2023 key)
+    # https://www.jenkins.io/blog/2025/12/23/repository-signing-keys-changing/
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+    dest: /usr/share/keyrings/jenkins-keyring.asc
+    mode: "0644"
+    force: true
+
+- name: Add Jenkins apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+    filename: jenkins
+    state: present
+
+- name: Install Jenkins
+  ansible.builtin.apt:
+    # debian-stable is the LTS line. latest picks up security releases
+    # (2.568.x stays behind until this is latest, not present).
+    name: jenkins
+    # A pipeline running on this controller must not apt-upgrade Jenkins:
+    # the package postinst restarts the service and kills the build.
+    state: "{{ 'present' if (alchemy_from_jenkins | default(false) | bool) else 'latest' }}"
+    update_cache: true
+    lock_timeout: 300
+  register: apt_jenkins
+  retries: 20
+  delay: 15
+  until: apt_jenkins is succeeded
+
+- name: Stop Jenkins before plugin/config seed
+  ansible.builtin.service:
+    name: jenkins
+    state: stopped
+  failed_when: false
+  when: not (alchemy_from_jenkins | default(false) | bool)
+
+- name: Add jenkins user to docker group
+  ansible.builtin.user:
+    name: jenkins
+    groups: docker
+    append: true
+
+# Lab NAT often has no working IPv6; glibc/npm may still try AAAA first and
+# fail npm audit with an empty "reason: undefined".
+- name: Prefer IPv4 over IPv6 for outbound name resolution
+  ansible.builtin.blockinfile:
+    path: /etc/gai.conf
+    create: true
+    mode: "0644"
+    marker: "# {mark} ANSIBLE MANAGED automation-alchemy ipv4 preference"
+    block: |
+      precedence  ::1/128       50
+      precedence  ::/0          40
+      precedence  2002::/16     30
+      precedence  ::/96         20
+      precedence  ::ffff:0:0/96 100
+
+- name: Ensure Jenkins casc directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: "0755"
+  loop:
+    - /var/lib/jenkins/casc_configs
+    - /var/lib/jenkins/init.groovy.d
+    - /usr/share/jenkins/ref/plugins
+
+- name: Install Jenkins Configuration as Code YAML
+  ansible.builtin.template:
+    src: jenkins.yaml.j2
+    dest: /var/lib/jenkins/casc_configs/jenkins.yaml
+    owner: jenkins
+    group: jenkins
+    mode: "0644"
+  notify: Restart jenkins
+
+- name: Install groovy init to skip setup wizard + seed job
+  ansible.builtin.template:
+    src: init-alchemy.groovy.j2
+    dest: /var/lib/jenkins/init.groovy.d/init-alchemy.groovy
+    owner: jenkins
+    group: jenkins
+    mode: "0644"
+  notify: Restart jenkins
+
+- name: Configure Jenkins systemd drop-in for JCasC
+  ansible.builtin.file:
+    path: /etc/systemd/system/jenkins.service.d
+    state: directory
+    mode: "0755"
+
+- name: Write Jenkins environment override
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/jenkins.service.d/override.conf
+    mode: "0644"
+    content: |
+      [Service]
+      Environment="JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false"
+      Environment="CASC_JENKINS_CONFIG=/var/lib/jenkins/casc_configs"
+      Environment="NODE_OPTIONS=--dns-result-order=ipv4first"
+      Environment="AIWIN_SSH_HOST={{ aiwin_ssh_host }}"
+      Environment="AIWIN_SSH_USER={{ aiwin_ssh_user }}"
+      Environment="AIWIN_SSH_PORT={{ aiwin_ssh_port }}"
+      Environment="AIWIN_PROJECT={{ aiwin_project_dir }}"
+  notify:
+    - Reload systemd
+    - Restart jenkins
+
+- name: Install jenkins-plugin-cli helper
+  ansible.builtin.get_url:
+    url: https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.13.2/jenkins-plugin-manager-2.13.2.jar
+    dest: /usr/local/lib/jenkins-plugin-manager.jar
+    mode: "0644"
+
+- name: Install required Jenkins plugins
+  ansible.builtin.command:
+    cmd: >-
+      java -jar /usr/local/lib/jenkins-plugin-manager.jar
+      --war /usr/share/java/jenkins.war
+      --plugin-download-directory /var/lib/jenkins/plugins
+      --latest true
+      --plugins
+      configuration-as-code
+      workflow-aggregator
+      git
+      pipeline-stage-view
+      credentials-binding
+      credentials
+      ssh-credentials
+      plain-credentials
+      generic-webhook-trigger
+      timestamper
+      job-dsl
+      ws-cleanup
+      slack
+  args:
+    creates: /var/lib/jenkins/.alchemy-plugins-installed-v5
+  become: true
+  become_user: root
+  register: plugins_install
+  notify: Restart jenkins
+
+- name: Stamp Jenkins plugins install
+  ansible.builtin.file:
+    path: /var/lib/jenkins/.alchemy-plugins-installed-v5
+    state: touch
+    owner: jenkins
+    group: jenkins
+    mode: "0644"
+  when: plugins_install is changed
+
+- name: Fix plugin ownership
+  ansible.builtin.file:
+    path: /var/lib/jenkins/plugins
+    owner: jenkins
+    group: jenkins
+    recurse: true
+
+- name: Enable and start Jenkins
+  ansible.builtin.systemd:
+    name: jenkins
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for Jenkins HTTP
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ jenkins_port }}/login"
+    status_code: [200, 403]
+  register: jenkins_up
+  retries: 30
+  delay: 5
+  until: jenkins_up is succeeded
+
+- name: Ensure local Docker registry container
+  ansible.builtin.shell: |
+    set -euo pipefail
+    mkdir -p /var/lib/automation-alchemy/registry
+    if docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -qx aa-registry; then
+      echo already
+      exit 0
+    fi
+    if docker ps -a --format '{% raw %}{{.Names}}{% endraw %}' | grep -qx aa-registry; then
+      docker start aa-registry
+      echo started
+      exit 0
+    fi
+    docker run -d --name aa-registry --restart unless-stopped \
+      -p {{ registry_port }}:5000 \
+      -v /var/lib/automation-alchemy/registry:/var/lib/registry \
+      registry:2
+    touch /var/lib/automation-alchemy/registry/.ansible_registry_started
+    echo created
+  args:
+    executable: /bin/bash
+  register: reg
+  changed_when: "'created' in reg.stdout or 'started' in reg.stdout"
+
+# Jenkins app path runs npm run lint / npm test / npm audit on the controller.
+- name: Install Node.js 20 for CI lint/test/audit
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+      major="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"
+      if [[ "${major}" -ge 18 ]]; then
+        echo present
+        exit 0
+      fi
+    fi
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+    node -v
+    npm -v
+    echo installed
+  args:
+    executable: /bin/bash
+  register: node_install
+  changed_when: "'installed' in node_install.stdout"
+  retries: 3
+  delay: 10
+  until: node_install is succeeded
+
+- name: Install Trivy for image scanning
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if command -v trivy >/dev/null 2>&1; then
+      echo present
+      exit 0
+    fi
+    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+    echo installed
+  args:
+    executable: /bin/bash
+  register: trivy_install
+  changed_when: "'installed' in trivy_install.stdout"
+
+- name: Ensure ansible controller tools exist on cicd for pipeline deploys
+  ansible.builtin.apt:
+    # On Ubuntu 22.04, ansible (2.10) conflicts with ansible-core — install core only.
+    name:
+      - ansible-core
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  register: apt_ansible_core
+  retries: 20
+  delay: 15
+  until: apt_ansible_core is succeeded
+
+- name: Allow jenkins passwordless sudo for ansible deploy (lab only)
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/jenkins-alchemy
+    mode: "0440"
+    content: |
+      jenkins ALL=(ALL) NOPASSWD: /usr/bin/ansible-playbook, /usr/bin/ansible, /usr/bin/docker
+    validate: visudo -cf %s
+
+- name: Ensure jenkins .ssh directory
+  ansible.builtin.file:
+    path: /var/lib/jenkins/.ssh
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: "0700"
+
+- name: Install deploy SSH key for jenkins (Ansible → lab VMs)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../keys/id_ed25519"
+    dest: /var/lib/jenkins/.ssh/id_ed25519
+    owner: jenkins
+    group: jenkins
+    mode: "0600"
+  when: lookup('ansible.builtin.file', playbook_dir + '/../../keys/id_ed25519', errors='ignore') | length > 0
+
+- name: Install deploy SSH public key for jenkins
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../keys/id_ed25519.pub"
+    dest: /var/lib/jenkins/.ssh/id_ed25519.pub
+    owner: jenkins
+    group: jenkins
+    mode: "0644"
+  when: lookup('ansible.builtin.file', playbook_dir + '/../../keys/id_ed25519.pub', errors='ignore') | length > 0
+
+- name: Trust Git forge SSH host key for jenkins git checkout
+  ansible.builtin.shell: |
+    set -euo pipefail
+    mkdir -p /var/lib/jenkins/.ssh
+    touch /var/lib/jenkins/.ssh/known_hosts
+    if grep -q "{{ gitea_host }}" /var/lib/jenkins/.ssh/known_hosts 2>/dev/null; then
+      echo present
+      exit 0
+    fi
+    ssh-keyscan -t rsa,ecdsa,ed25519 "{{ gitea_host }}" >> /var/lib/jenkins/.ssh/known_hosts
+    chown jenkins:jenkins /var/lib/jenkins/.ssh/known_hosts
+    chmod 644 /var/lib/jenkins/.ssh/known_hosts
+    echo updated
+  args:
+    executable: /bin/bash
+  register: gitea_keyscan
+  changed_when: "'updated' in gitea_keyscan.stdout"
+  failed_when: false
+
+- name: SSH config for jenkins → VirtualBox host and Git forge
+  ansible.builtin.copy:
+    dest: /var/lib/jenkins/.ssh/config
+    owner: jenkins
+    group: jenkins
+    mode: "0600"
+    content: |
+      Host {{ gitea_host }}
+        User git
+        IdentityFile /var/lib/jenkins/.ssh/id_ed25519
+        IdentitiesOnly yes
+
+      Host lab-host
+        HostName {{ aiwin_ssh_host }}
+        User {{ aiwin_ssh_user }}
+        Port {{ aiwin_ssh_port }}
+        IdentityFile /var/lib/jenkins/.ssh/id_ed25519
+        IdentitiesOnly yes
+        StrictHostKeyChecking accept-new
+

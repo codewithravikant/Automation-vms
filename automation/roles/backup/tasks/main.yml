@@ -1,0 +1,103 @@
+---
+- name: Configure dedicated backup host
+  when: inventory_hostname == 'backup'
+  block:
+    - name: Wait until apt/dpkg locks are free
+      ansible.builtin.shell: |
+        ! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1
+      register: apt_lock_free
+      retries: 60
+      delay: 5
+      until: apt_lock_free.rc == 0
+      changed_when: false
+
+    - name: Install rsync on backup host
+      ansible.builtin.apt:
+        name: rsync
+        state: present
+        lock_timeout: 300
+      register: apt_rsync
+      retries: 20
+      delay: 15
+      until: apt_rsync is succeeded
+
+    - name: Create backup directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: "{{ devops_user }}"
+        mode: "0750"
+      loop:
+        - /var/backups/automation-alchemy
+        - /var/backups/automation-alchemy/weekly
+        - /var/backups/automation-alchemy/logs
+
+    - name: Install backup helper scripts
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../scripts/{{ item.src }}"
+        dest: "/usr/local/sbin/{{ item.dest }}"
+        mode: "0755"
+      loop:
+        - { src: backup-run.sh, dest: aa-backup-run }
+        - { src: backup-restore.sh, dest: aa-backup-restore }
+        - { src: backup-list.sh, dest: aa-backup-list }
+
+    - name: Install backup systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/aa-backup.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Automation-VMs weekly backup
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/aa-backup-run
+          Nice=10
+          IOSchedulingClass=best-effort
+          IOSchedulingPriority=7
+
+    - name: Install backup systemd timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/aa-backup.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Weekly Automation-VMs backup timer
+
+          [Timer]
+          OnCalendar=Sun *-*-* 02:30:00
+          Persistent=true
+          Unit=aa-backup.service
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable weekly backup timer
+      ansible.builtin.systemd:
+        name: aa-backup.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+- name: Stage backup-export tooling on non-backup hosts
+  when: inventory_hostname != 'backup'
+  block:
+    - name: Ensure export directory
+      ansible.builtin.file:
+        path: "{{ deploy_state_dir }}/backup-export"
+        state: directory
+        owner: "{{ devops_user }}"
+        group: "{{ devops_user }}"
+        mode: "0755"
+
+    - name: Install backup-export via provisioning script
+      ansible.builtin.command:
+        cmd: bash {{ project_root }}/provisioning/backup-export.sh
+      environment:
+        PROJECT_ROOT: "{{ project_root }}"
+        VM_HOSTNAME: "{{ inventory_hostname }}"
+      changed_when: false

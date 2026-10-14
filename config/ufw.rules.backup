@@ -1,0 +1,5 @@
+# Extra UFW allows for backup VM.
+# Format: remainder of `ufw allow ...`
+# SSH (22/tcp) already allowed by base rules. No public HTTP.
+
+from 10.10.0.0/24 to any port 22 proto tcp

@@ -1,0 +1,111 @@
+// Automation-VMs — manual / demo rollback job
+// Parameter TAG empty → playbooks/rollback.yml (PREVIOUS_TAG)
+// Parameter TAG set → playbooks/deploy.yml -e image_tag=TAG
+
+pipeline {
+  agent any
+
+  parameters {
+    string(
+      name: 'TAG',
+      defaultValue: '',
+      description: 'Image tag to redeploy. Empty = PREVIOUS_TAG from /var/lib/automation-alchemy/deployed_version'
+    )
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+  }
+
+  environment {
+    PROJECT_ROOT = '/opt/automation-alchemy'
+    ANSIBLE_DIR  = '/opt/automation-alchemy/automation'
+  }
+
+  stages {
+    stage('Rollback') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -euo pipefail
+          cd "${ANSIBLE_DIR}"
+          export ANSIBLE_PRIVATE_KEY_FILE=/var/lib/jenkins/.ssh/id_ed25519
+          if [[ ! -f "${ANSIBLE_PRIVATE_KEY_FILE}" ]]; then
+            ANSIBLE_PRIVATE_KEY_FILE=/opt/automation-alchemy/keys/id_ed25519
+          fi
+          if [[ -n "${TAG}" ]]; then
+            echo "Redeploying explicit tag ${TAG}"
+            ansible-playbook playbooks/deploy.yml \
+              -e "image_tag=${TAG}" \
+              --private-key "${ANSIBLE_PRIVATE_KEY_FILE}"
+          else
+            echo "Rolling back to PREVIOUS_TAG"
+            ansible-playbook playbooks/rollback.yml \
+              --private-key "${ANSIBLE_PRIVATE_KEY_FILE}"
+          fi
+          bash "${PROJECT_ROOT}/scripts/app-verify.sh"
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      script {
+        def msg = ":rewind: Alchemy rollback OK (TAG=${params.TAG ?: 'PREVIOUS'}) → http://10.10.0.10/ (<${env.BUILD_URL}|Open>)"
+        def sent = false
+        try {
+          slackSend(
+            channel: '#jenkins-builds',
+            color: 'good',
+            botUser: true,
+            tokenCredentialId: 'slack-bot-token',
+            message: msg
+          )
+          sent = true
+        } catch (err) {
+          echo "slackSend unavailable (${err}); falling back to Incoming Webhook"
+        }
+        if (!sent) {
+          withEnv(["SLACK_MSG=${msg}"]) {
+            sh '''#!/usr/bin/env bash
+              set -euo pipefail
+              bash "${PROJECT_ROOT}/scripts/notify-slack.sh" \
+                "${PROJECT_ROOT}/automation/secrets/slack_webhook" \
+                "${SLACK_MSG}" || true
+            '''
+          }
+        }
+      }
+    }
+    failure {
+      script {
+        def msg = ":x: Alchemy rollback FAILED (TAG=${params.TAG ?: 'PREVIOUS'}) (<${env.BUILD_URL}|Open>)"
+        def sent = false
+        try {
+          slackSend(
+            channel: '#jenkins-builds',
+            color: 'danger',
+            botUser: true,
+            tokenCredentialId: 'slack-bot-token',
+            message: msg
+          )
+          sent = true
+        } catch (err) {
+          echo "slackSend unavailable (${err}); falling back to Incoming Webhook"
+        }
+        if (!sent) {
+          withEnv(["SLACK_MSG=${msg}"]) {
+            sh '''#!/usr/bin/env bash
+              set -euo pipefail
+              bash "${PROJECT_ROOT}/scripts/notify-slack.sh" \
+                "${PROJECT_ROOT}/automation/secrets/slack_webhook" \
+                "${SLACK_MSG}" || true
+            '''
+          }
+        }
+      }
+    }
+  }
+}

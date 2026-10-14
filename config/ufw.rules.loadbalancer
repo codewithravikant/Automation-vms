@@ -1,0 +1,4 @@
+# Extra UFW allows for the loadbalancer only (applied after config/ufw.rules).
+# Format: remainder of `ufw allow ...`
+
+80/tcp

@@ -1,0 +1,4 @@
+# Extra UFW allows for web1 (frontend containers).
+# Format: remainder of `ufw allow ...`
+
+from 10.10.0.0/24 to any port 80 proto tcp

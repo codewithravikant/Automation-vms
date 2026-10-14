@@ -1,0 +1,65 @@
+---
+# Pull tagged images from local registry and (re)start app containers.
+# Pass -e image_tag=<gitsha> from Jenkins / alchemy.sh (default: latest).
+
+- name: Deploy backend on appserver
+  hosts: apps
+  gather_facts: false
+  roles:
+    - role: app_deploy
+      vars:
+        app_deploy_component: backend
+
+- name: Deploy frontend on web hosts
+  hosts: web
+  gather_facts: false
+  roles:
+    - role: app_deploy
+      vars:
+        app_deploy_component: frontend
+
+- name: Refresh load balancer
+  hosts: lb
+  gather_facts: true
+  roles:
+    - role: loadbalancer
+
+- name: Record last-known-good on cicd
+  hosts: cicd_hosts
+  gather_facts: true
+  tasks:
+    - name: Ensure deploy state dir
+      ansible.builtin.file:
+        path: "{{ deploy_state_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Stat existing version file
+      ansible.builtin.stat:
+        path: "{{ deployed_version_file }}"
+      register: ver_stat
+
+    - name: Read previous deployed version
+      ansible.builtin.slurp:
+        src: "{{ deployed_version_file }}"
+      register: prev_ver
+      when: ver_stat.stat.exists
+
+    - name: Compute previous tag
+      ansible.builtin.set_fact:
+        prior_tag: >-
+          {{
+            (prev_ver.content | b64decode | regex_findall('(?m)^IMAGE_TAG=(.+)$') | first | default('') | trim)
+            if prev_ver.content is defined else ''
+          }}
+
+    - name: Persist deployed version
+      ansible.builtin.copy:
+        dest: "{{ deployed_version_file }}"
+        mode: "0644"
+        content: |
+          IMAGE_TAG={{ image_tag }}
+          PREVIOUS_TAG={{ prior_tag | default('') }}
+          BACKEND={{ registry }}/{{ backend_image_name }}:{{ image_tag }}
+          FRONTEND={{ registry }}/{{ frontend_image_name }}:{{ image_tag }}
+          UPDATED_AT={{ ansible_date_time.iso8601 }}

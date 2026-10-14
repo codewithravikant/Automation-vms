@@ -1,0 +1,110 @@
+---
+- name: Wait until apt/dpkg locks are free
+  ansible.builtin.shell: |
+    ! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1
+  register: apt_lock_free
+  retries: 60
+  delay: 5
+  until: apt_lock_free.rc == 0
+  changed_when: false
+
+- name: Install nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  register: apt_nginx
+  retries: 20
+  delay: 15
+  until: apt_nginx is succeeded
+
+- name: Select LB config source
+  ansible.builtin.set_fact:
+    lb_conf_src: >-
+      {{
+        (playbook_dir + '/../../config/nginx-lb.least_conn.conf')
+        if lb_algorithm in ['least_conn', 'least-conn']
+        else (
+          (playbook_dir + '/../../config/nginx-lb.resource.conf')
+          if lb_algorithm in ['resource', 'adaptive', 'resource-based']
+          else (playbook_dir + '/../../config/nginx-lb.conf')
+        )
+      }}
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Install LB site config
+  ansible.builtin.copy:
+    src: "{{ lb_conf_src }}"
+    dest: /etc/nginx/sites-available/automation-alchemy-lb
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable LB site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/automation-alchemy-lb
+    dest: /etc/nginx/sites-enabled/automation-alchemy-lb
+    state: link
+  notify: Reload nginx
+
+- name: Write LB status JSON
+  ansible.builtin.copy:
+    dest: "{{ deploy_state_dir }}/lb-status.json"
+    mode: "0644"
+    content: |
+      {"algorithm":"{{ lb_algorithm }}","updatedAt":"{{ ansible_date_time.iso8601 }}"}
+
+- name: Install resource adapt helper
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/lb-resource-adapt.sh"
+    dest: /usr/local/sbin/aa-lb-resource-adapt
+    mode: "0755"
+
+- name: Install resource adapt systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/aa-lb-resource-adapt.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Automation-VMs resource-based LB weight update
+      After=network-online.target nginx.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/aa-lb-resource-adapt
+      Nice=10
+
+- name: Install resource adapt systemd timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/aa-lb-resource-adapt.timer
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Periodic resource-based LB adaptation
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=30s
+      AccuracySec=5s
+      Persistent=true
+      Unit=aa-lb-resource-adapt.service
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable nginx
+  ansible.builtin.service:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Manage resource adapt timer
+  ansible.builtin.systemd:
+    name: aa-lb-resource-adapt.timer
+    enabled: "{{ lb_algorithm in ['resource', 'adaptive', 'resource-based'] }}"
+    state: "{{ 'started' if lb_algorithm in ['resource', 'adaptive', 'resource-based'] else 'stopped' }}"
+    daemon_reload: true

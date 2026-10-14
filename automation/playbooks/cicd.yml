@@ -1,0 +1,14 @@
+---
+# Jenkins + local Docker registry on cicd.
+- name: Configure CI/CD host
+  hosts: cicd_hosts
+  gather_facts: true
+  roles:
+    - role: docker
+    - role: cicd
+
+- name: Ensure app hosts trust insecure registry
+  hosts: web:apps
+  gather_facts: false
+  roles:
+    - role: docker

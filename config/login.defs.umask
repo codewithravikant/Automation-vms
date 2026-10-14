@@ -1,0 +1,4 @@
+# Snippet applied to /etc/login.defs by provisioning/umask.sh
+# Format: key + tab + value (login.defs style)
+
+UMASK		027

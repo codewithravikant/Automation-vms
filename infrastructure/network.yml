@@ -1,0 +1,16 @@
+# Private network shared by all VMs
+cidr: 10.10.0.0/24
+adapter: private_network
+
+# Hostname resolution map (passed to guests as NETWORK_HOSTS).
+# Keep config/hosts aligned with this map.
+hosts:
+  10.10.0.10: loadbalancer
+  10.10.0.11: web1
+  10.10.0.12: web2
+  10.10.0.20: appserver
+  10.10.0.30: backup
+  10.10.0.40: cicd
+
+# NAT (adapter 1) provides internet for apt / updates
+# private_network (adapter 2) provides VM-to-VM and host access

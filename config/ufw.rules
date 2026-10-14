@@ -1,0 +1,4 @@
+# UFW rules applied by provisioning/firewall.sh
+# Format: one allow rule per line (port/proto)
+
+22/tcp

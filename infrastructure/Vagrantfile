@@ -1,0 +1,49 @@
+# frozen_string_literal: true
+
+require "yaml"
+
+ROOT = File.expand_path("..", __dir__)
+MACHINES = YAML.load_file(File.join(__dir__, "machines.yml"))
+NETWORK  = YAML.load_file(File.join(__dir__, "network.yml"))
+
+Vagrant.configure("2") do |config|
+  config.vm.box = MACHINES["box"]
+
+  # Entire project available inside guests for modular provisioning
+  config.vm.synced_folder ROOT, "/opt/automation-alchemy",
+    create: true,
+    type: "virtualbox"
+
+  # Project-local SSH key for devops (created by scripts/create.sh)
+  pubkey_path = File.join(ROOT, "keys", "id_ed25519.pub")
+  if File.exist?(pubkey_path)
+    config.vm.provision "file",
+      source: pubkey_path,
+      destination: "/tmp/devops_authorized_key"
+  end
+
+  MACHINES["machines"].each do |name, settings|
+    config.vm.define name do |server|
+      server.vm.hostname = name
+
+      server.vm.network "private_network", ip: settings["ip"]
+
+      server.vm.provider "virtualbox" do |vb|
+        vb.name = name
+        vb.memory = settings["memory"]
+        vb.cpus = settings["cpus"]
+        # Group all project VMs under one VirtualBox folder
+        vb.customize ["modifyvm", :id, "--groups", "/Automation-Alchemy"]
+      end
+
+      server.vm.provision "shell",
+        path: File.join(ROOT, "provisioning", "bootstrap.sh"),
+        env: {
+          "VM_HOSTNAME" => name,
+          "VM_IP" => settings["ip"],
+          "NETWORK_HOSTS" => NETWORK["hosts"].map { |ip, host| "#{ip} #{host}" }.join("\n"),
+          "PROJECT_ROOT" => "/opt/automation-alchemy"
+        }
+    end
+  end
+end

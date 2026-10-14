@@ -1,0 +1,11 @@
+# Guest /etc/hosts managed block (without BEGIN/END markers).
+# Keep in sync with infrastructure/network.yml — YAML drives Vagrant IPs;
+# this file is what provisioning/hosts.sh installs into guests.
+# Format: IP hostname
+
+10.10.0.10 loadbalancer
+10.10.0.11 web1
+10.10.0.12 web2
+10.10.0.20 appserver
+10.10.0.30 backup
+10.10.0.40 cicd

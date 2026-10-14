@@ -1,0 +1,59 @@
+---
+- name: Ensure Docker is available for deploy
+  ansible.builtin.command: docker --version
+  changed_when: false
+
+- name: Deploy backend container
+  when: app_deploy_component | default('') == 'backend'
+  block:
+    - name: Pull backend image
+      ansible.builtin.command:
+        cmd: "docker pull {{ registry }}/{{ backend_image_name }}:{{ image_tag }}"
+      register: pull_be
+      changed_when: "'Downloaded' in pull_be.stdout or 'Status: Downloaded' in pull_be.stdout or pull_be.rc == 0"
+
+    - name: Tag backend as local latest alias
+      ansible.builtin.command:
+        cmd: "docker tag {{ registry }}/{{ backend_image_name }}:{{ image_tag }} {{ backend_image_name }}:{{ image_tag }}"
+      changed_when: false
+
+    - name: Stop old backend container
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ backend_container }}"
+      register: rm_be
+      failed_when: false
+      changed_when: rm_be.rc == 0
+
+    - name: Run backend container
+      ansible.builtin.command:
+        cmd: >-
+          docker run -d --name {{ backend_container }}
+          --restart unless-stopped
+          -p 3000:3000
+          -e PORT=3000
+          {{ registry }}/{{ backend_image_name }}:{{ image_tag }}
+
+- name: Deploy frontend container
+  when: app_deploy_component | default('') == 'frontend'
+  block:
+    - name: Pull frontend image
+      ansible.builtin.command:
+        cmd: "docker pull {{ registry }}/{{ frontend_image_name }}:{{ image_tag }}"
+
+    - name: Stop old frontend container
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ frontend_container }}"
+      register: rm_fe
+      failed_when: false
+      changed_when: rm_fe.rc == 0
+
+    - name: Run frontend container
+      ansible.builtin.command:
+        cmd: >-
+          docker run -d --name {{ frontend_container }}
+          --restart unless-stopped
+          -p 80:80
+          -e BACKEND_HOST={{ appserver_ip }}
+          -e BACKEND_PORT=3000
+          -e WEB_SERVER={{ inventory_hostname }}
+          {{ registry }}/{{ frontend_image_name }}:{{ image_tag }}

@@ -1,0 +1,163 @@
+---
+- name: Ensure hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+# Fresh Ubuntu boots often run apt-daily / unattended-upgrades; that races Ansible.
+- name: Stop background apt jobs before package installs
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - apt-daily.service
+    - apt-daily-upgrade.service
+    - unattended-upgrades.service
+  failed_when: false
+  changed_when: false
+
+- name: Wait until apt/dpkg locks are free
+  ansible.builtin.shell: |
+    ! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1
+  register: apt_lock_free
+  retries: 60
+  delay: 5
+  until: apt_lock_free.rc == 0
+  changed_when: false
+
+- name: Point apt at HTTPS mirrors
+  ansible.builtin.command: bash {{ project_root }}/provisioning/apt-https.sh
+  changed_when: false
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - vim
+      - htop
+      - python3
+      - openssh-server
+      - ufw
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  register: apt_base_packages
+  retries: 20
+  delay: 15
+  until: apt_base_packages is succeeded
+
+- name: Manage /etc/hosts block
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} automation-alchemy"
+    block: "{{ network_hosts_lines }}"
+
+- name: Ensure devops user exists
+  ansible.builtin.user:
+    name: "{{ devops_user }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    create_home: true
+
+- name: Set devops password (lab sudo)
+  ansible.builtin.shell: |
+    echo "{{ devops_user }}:{{ devops_password }}" | chpasswd
+  args:
+    executable: /bin/bash
+  changed_when: false
+  no_log: true
+
+- name: Remove passwordless sudo drop-in if present
+  ansible.builtin.file:
+    path: /etc/sudoers.d/devops
+    state: absent
+
+- name: Install SSH hardening drop-in
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../config/sshd_config"
+    dest: /etc/ssh/sshd_config.d/99-automation-alchemy.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ssh
+
+- name: Ensure devops .ssh directory
+  ansible.builtin.file:
+    path: "/home/{{ devops_user }}/.ssh"
+    state: directory
+    owner: "{{ devops_user }}"
+    group: "{{ devops_user }}"
+    mode: "0700"
+
+- name: Install devops authorized key from controller
+  ansible.builtin.authorized_key:
+    user: "{{ devops_user }}"
+    key: "{{ lookup('file', playbook_dir + '/../../keys/id_ed25519.pub') }}"
+    exclusive: false
+  when: lookup('ansible.builtin.file', playbook_dir + '/../../keys/id_ed25519.pub', errors='ignore') | length > 0
+
+- name: Install umask profile snippet
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../config/zz-secure-umask.sh"
+    dest: /etc/profile.d/zz-secure-umask.sh
+    mode: "0644"
+
+- name: Ensure login.defs UMASK 027
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^UMASK'
+    line: "UMASK\t\t027"
+
+- name: Ensure devops bashrc umask
+  ansible.builtin.lineinfile:
+    path: "/home/{{ devops_user }}/.bashrc"
+    line: "umask 027"
+    create: true
+    owner: "{{ devops_user }}"
+    group: "{{ devops_user }}"
+
+- name: Install unattended-upgrades periodic config
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../config/20auto-upgrades"
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+
+- name: Enable unattended-upgrades service
+  ansible.builtin.service:
+    name: unattended-upgrades
+    enabled: true
+    state: started
+
+- name: Ensure deploy state directory
+  ansible.builtin.file:
+    path: "{{ deploy_state_dir }}"
+    state: directory
+    owner: "{{ devops_user }}"
+    group: "{{ devops_user }}"
+    mode: "0755"
+
+- name: Apply UFW base + role rules (parity with firewall.sh)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    ufw --force reset >/dev/null
+    ufw default deny incoming
+    ufw default allow outgoing
+    while IFS= read -r rule || [[ -n "${rule}" ]]; do
+      [[ -z "${rule}" || "${rule}" =~ ^# ]] && continue
+      ufw allow ${rule}
+    done < "{{ project_root }}/config/ufw.rules"
+    ROLE="{{ project_root }}/config/ufw.rules.{{ inventory_hostname }}"
+    if [[ -f "${ROLE}" ]]; then
+      while IFS= read -r rule || [[ -n "${rule}" ]]; do
+        [[ -z "${rule}" || "${rule}" =~ ^# ]] && continue
+        ufw allow ${rule}
+      done < "${ROLE}"
+    fi
+    ufw --force enable
+  args:
+    executable: /bin/bash
+  changed_when: false

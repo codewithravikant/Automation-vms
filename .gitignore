@@ -1,0 +1,61 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# Secrets / keys (keep .gitkeep)
+keys/*
+!keys/.gitkeep
+
+# Vagrant / VirtualBox
+.vagrant/
+*.box
+
+# Env / local overrides
+.env
+.env.*
+!.env.example
+
+# Host-side apt upgrade log (make apt-upgrade-bg)
+logs/
+
+# Backups / local artifacts
+*.tar.gz
+*.bak
+.backup-cache/
+.restore-staging/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local-only review sheet
+QnA.MD
+
+# Cursor local project brief (paste task info; agents cross-check)
+.cursor/project-info.local.md
+!.cursor/project-info.local.md.example
+!.cursor/rules/
+
+# Track project docs (overrides global **/*.md)
+!docs/
+!docs/**/*.md
+
+# Personal operator notes (host LAN IP / user) — keep after !docs rules
+docs/**/*.local.md
+
+# Local-only demo / planning notes
+docs/roadmap.md
+
+# Secrets (Slack / webhook tokens, etc.) — never commit real values
+automation/secrets/slack_webhook
+automation/secrets/*
+!automation/secrets/.gitkeep
+!automation/secrets/*.example

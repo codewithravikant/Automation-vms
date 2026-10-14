@@ -1,0 +1,253 @@
+import jenkins.model.*
+import hudson.model.*
+import hudson.security.*
+import hudson.plugins.git.*
+import hudson.plugins.git.extensions.*
+import hudson.plugins.git.extensions.impl.*
+import com.cloudbees.plugins.credentials.*
+import com.cloudbees.plugins.credentials.domains.*
+import com.cloudbees.plugins.credentials.impl.*
+import com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey
+import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+import hudson.util.Secret
+import org.jenkinsci.plugins.workflow.job.WorkflowJob
+import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+import org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition
+import hudson.model.ParametersDefinitionProperty
+import hudson.model.BooleanParameterDefinition
+import hudson.model.StringParameterDefinition
+import hudson.triggers.SCMTrigger
+import java.util.Collections
+
+def instance = Jenkins.getInstance()
+
+// Disable setup wizard
+def marker = new File(instance.getRootDir(), "jenkins.install.InstallUtil.lastExecVersion")
+if (!marker.exists()) {
+  marker.text = "2.0"
+}
+
+def loadOrFallback = { File f, String fallback ->
+  f.exists() ? f.getText("UTF-8") : fallback
+}
+
+def upsertSecretText = { String id, String description, String secretText ->
+  def store = SystemCredentialsProvider.getInstance().getStore()
+  def existing = CredentialsProvider.lookupCredentials(
+    StringCredentialsImpl.class, instance, null, Collections.emptyList()
+  ).find { it.id == id }
+  def cred = new StringCredentialsImpl(
+    CredentialsScope.GLOBAL,
+    id,
+    description,
+    Secret.fromString(secretText)
+  )
+  if (existing) {
+    store.updateCredentials(Domain.global(), existing, cred)
+    println "Updated credential: ${id}"
+  } else {
+    store.addCredentials(Domain.global(), cred)
+    println "Added credential: ${id}"
+  }
+}
+
+def upsertSshKey = { String id, String description, String username, File privateKeyFile ->
+  if (privateKeyFile == null || !privateKeyFile.exists() || !privateKeyFile.canRead()) {
+    println "SSH key missing or unreadable (${privateKeyFile}) — skip credential ${id}"
+    return
+  }
+  def store = SystemCredentialsProvider.getInstance().getStore()
+  def existing = CredentialsProvider.lookupCredentials(
+    BasicSSHUserPrivateKey.class, instance, null, Collections.emptyList()
+  ).find { it.id == id }
+  def source = new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(privateKeyFile.getText("UTF-8"))
+  def cred = new BasicSSHUserPrivateKey(
+    CredentialsScope.GLOBAL,
+    id,
+    username,
+    source,
+    "",
+    description
+  )
+  if (existing) {
+    store.updateCredentials(Domain.global(), existing, cred)
+    println "Updated SSH credential: ${id}"
+  } else {
+    store.addCredentials(Domain.global(), cred)
+    println "Added SSH credential: ${id}"
+  }
+}
+
+// Seed Git webhook token from secrets file (optional)
+def webhookFile = new File("/opt/automation-alchemy/automation/secrets/gitea_webhook")
+def webhookToken = null
+if (webhookFile.exists()) {
+  webhookToken = webhookFile.getText("UTF-8").trim().readLines().find { line ->
+    line && !line.startsWith("#")
+  }
+}
+if (webhookToken) {
+  upsertSecretText("gitea-webhook-token", "Git → Jenkins webhook token", webhookToken)
+} else {
+  // Placeholder so GenericTrigger tokenCredentialId resolves; replace via secrets file
+  upsertSecretText("gitea-webhook-token", "Git → Jenkins webhook token (CHANGE ME)", "CHANGE_ME")
+  println "WARNING: set automation/secrets/gitea_webhook then re-run cicd.yml"
+}
+
+// Seed Slack Bot User OAuth Token (optional). File may hold xoxb-... or a legacy webhook URL.
+def slackFile = new File("/opt/automation-alchemy/automation/secrets/slack_webhook")
+def slackSecret = null
+if (slackFile.exists()) {
+  slackSecret = slackFile.getText("UTF-8").trim().readLines().find { line ->
+    line && !line.startsWith("#")
+  }
+}
+if (slackSecret && slackSecret.startsWith("xoxb-")) {
+  upsertSecretText("{{ slack_credential_id }}", "Slack Bot User OAuth Token", slackSecret)
+} else if (slackSecret) {
+  println "WARNING: automation/secrets/slack_webhook is not an xoxb- bot token — Slack plugin credential not seeded"
+} else {
+  println "INFO: no Slack bot token file — slackSend will fail softly until secrets/slack_webhook is set"
+}
+
+// Deploy key for Git forge checkout (read-only on the forge)
+// keys/ is often mode 600 and owned by vagrant, so the Jenkins user cannot read it.
+// The cicd role also installs the same key at /var/lib/jenkins/.ssh/id_ed25519.
+def giteaDeployKey = [
+  "/var/lib/jenkins/.ssh/id_ed25519",
+  "/opt/automation-alchemy/keys/id_ed25519"
+].collect { new File(it) }.find { it.exists() && it.canRead() }
+upsertSshKey(
+  "gitea-deploy-key",
+  "Git deploy key (id_ed25519)",
+  "git",
+  giteaDeployKey
+)
+
+def giteaUrl = "{{ gitea_ssh_url }}"
+def giteaBranch = "{{ gitea_branch }}"
+
+def buildScmDefinition = {
+  def userRemoteConfigs = [
+    new UserRemoteConfig(giteaUrl, null, null, "gitea-deploy-key")
+  ]
+  def extensions = new ArrayList()
+  // Timeout must be an Integer. A String misses the constructor and the job
+  // falls back to an embedded Jenkinsfile, which has no Git SCM to poll.
+  // This Git plugin still needs a workspace before polling can see new commits,
+  // so the first build has to come from the webhook or Build Now.
+  extensions.add(new CloneOption(false, false, "", 50))
+  def scm = new GitSCM(
+    userRemoteConfigs,
+    [new BranchSpec("*/${giteaBranch}"), new BranchSpec("*/master")],
+    false,
+    Collections.emptyList(),
+    null,
+    null,
+    extensions
+  )
+  return new CpsScmFlowDefinition(scm, "Jenkinsfile")
+}
+
+// alchemy-app: Git webhook (instant) + SCM poll every minute (backup).
+// WorkflowJob has setTriggers(List) and no removeTrigger(). Calling removeTrigger
+// aborts this init script before the job is saved.
+def giteaWebhookTrigger = {
+  def refVar = new org.jenkinsci.plugins.gwt.GenericVariable("ref", '$.ref')
+  def trigger = new org.jenkinsci.plugins.gwt.GenericTrigger([refVar], [], [])
+  trigger.setTokenCredentialId("gitea-webhook-token")
+  trigger.setCauseString("Git push webhook")
+  trigger.setPrintContributedVariables(true)
+  trigger.setPrintPostContent(false)
+  trigger.setSilentResponse(true)
+  trigger.setRegexpFilterText('$ref')
+  trigger.setRegexpFilterExpression('refs/heads/(main|master)')
+  return trigger
+}
+
+def replaceTriggers = { job, List triggers ->
+  try {
+    job.setTriggers(triggers)
+    println "Triggers on ${job.fullName}: ${triggers.collect { it.class.simpleName }}"
+  } catch (Throwable t) {
+    println "WARNING: could not set triggers on ${job.fullName} (${t.message})"
+  }
+}
+
+def seedPipelineFromScm = { String jobName, String description, List params ->
+  def job = instance.getItem(jobName)
+  if (job == null) {
+    job = instance.createProject(WorkflowJob.class, jobName)
+  }
+  try {
+    job.setDefinition(buildScmDefinition())
+  } catch (Throwable t) {
+    println "SCM definition failed (${t.message}) — falling back to embedded Jenkinsfile"
+    def script = loadOrFallback(
+      new File("/opt/automation-alchemy/Jenkinsfile"),
+      "pipeline { agent any; stages { stage('x') { steps { error 'Jenkinsfile missing' } } } }"
+    )
+    job.setDefinition(new CpsFlowDefinition(script, true))
+  }
+  job.setDescription(description)
+  job.removeProperty(ParametersDefinitionProperty.class)
+  if (params != null && !params.isEmpty()) {
+    job.addProperty(new ParametersDefinitionProperty(params))
+  }
+  if (jobName == "alchemy-app") {
+    replaceTriggers(job, [giteaWebhookTrigger(), new SCMTrigger("* * * * *")])
+  } else {
+    replaceTriggers(job, [])
+  }
+  job.save()
+  println "Seeded pipeline job (SCM): ${jobName}"
+}
+
+def seedPipelineEmbedded = { String jobName, String description, String script, List params ->
+  def job = instance.getItem(jobName)
+  if (job == null) {
+    job = instance.createProject(WorkflowJob.class, jobName)
+  }
+  job.setDefinition(new CpsFlowDefinition(script, true))
+  job.setDescription(description)
+  job.removeProperty(ParametersDefinitionProperty.class)
+  if (params != null && !params.isEmpty()) {
+    job.addProperty(new ParametersDefinitionProperty(params))
+  }
+  replaceTriggers(job, [])
+  job.save()
+  println "Seeded pipeline job: ${jobName}"
+}
+
+seedPipelineFromScm(
+  "alchemy-app",
+  "Git webhook + SCM poll (1m): path detect → app deploy or make alchemy on host",
+  [
+    new BooleanParameterDefinition("FORCE_APP", false, "Force app deploy path"),
+    new BooleanParameterDefinition("FORCE_INFRA", false, "Force make alchemy on VirtualBox host")
+  ]
+)
+
+def missingRollback = """
+pipeline {
+  agent any
+  stages {
+    stage('Missing Jenkinsfile.rollback') {
+      steps { error 'Jenkinsfile.rollback not found at /opt/automation-alchemy/Jenkinsfile.rollback' }
+    }
+  }
+}
+"""
+
+seedPipelineEmbedded(
+  "alchemy-rollback",
+  "Manual rollback: empty TAG → PREVIOUS_TAG; or redeploy a specific image tag",
+  loadOrFallback(new File("/opt/automation-alchemy/Jenkinsfile.rollback"), missingRollback),
+  [
+    new StringParameterDefinition(
+      "TAG",
+      "",
+      "Image tag to redeploy. Empty = PREVIOUS_TAG from deployed_version"
+    )
+  ]
+)

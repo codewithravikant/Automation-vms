@@ -1,0 +1,17 @@
+# CI sandbox trigger file
+# Edit, append, or delete this file, then git push to exercise the pipeline.
+# Path routing treats test/ci-sandbox/** like app/ (full app CI path).
+updated=
+CI pipeline demo — 2026-09-04
+CI pipeline demo — 2026-10-11ping 2026-10-11T11:07:26Z
+CI pipeline demo — 2026-10-12222222
+
+ping 2026-10-11T19:03:55Z
+ping 2026-10-12T11:15:45Z
+ping 2026-10-12T11:26:39Z
+ping 2026-10-12T11:47:13Z
+ping 2026-10-12T13:04:33Z
+ping 2026-10-12T13:14:12Z
+ping 2026-10-12T19:35:41Z
+ping 2026-10-12T19:39:43Z
+ping 2026-10-12T19:45:43Z
